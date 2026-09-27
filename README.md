@@ -105,7 +105,6 @@ When PostgreSQL becomes unavailable, the Result service remains running, reports
 ```text
 Results currently unavailable
 ```
-![Results unavailable](ResultsUnavailable.png)
 
 The application must not present previously received results as current while the database is unavailable.
 
