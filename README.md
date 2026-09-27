@@ -63,3 +63,18 @@ The voting application only accepts one vote per client browser. It does not reg
 This isn't an example of a properly architected perfectly designed distributed app... it's just a simple
 example of the various types of pieces and languages you might see (queues, persistent data, etc), and how to
 deal with them in Docker at a basic level.
+
+# Database Failure Handling – Example Voting App
+
+## Overview
+
+This submission addresses a database failure scenario in the Result service of
+the Docker Example Voting App.
+
+The Result service is a Node.js application backed by PostgreSQL. It connects
+to PostgreSQL and periodically queries the database to retrieve the current
+vote counts.
+
+The change focuses on the behavior when PostgreSQL becomes unavailable after
+the Result service has already established a connection.
+
