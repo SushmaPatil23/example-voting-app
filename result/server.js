@@ -12,6 +12,9 @@ io.on('connection', function (socket) {
 
   socket.emit('message', { text : 'Welcome!' });
 
+  if (!dbAvailable) {
+    socket.emit('db-unavailable');
+  }
   socket.on('subscribe', function (data) {
     socket.join(data.channel);
   });
@@ -20,6 +23,8 @@ io.on('connection', function (socket) {
 var pool = new Pool({
   connectionString: 'postgres://postgres:postgres@db/postgres'
 });
+
+var dbAvailable = false;
 
 async.retry(
   {times: 1000, interval: 1000},
@@ -32,24 +37,36 @@ async.retry(
     });
   },
   function(err, client) {
-    if (err) {
-      return console.error("Giving up");
-    }
-    console.log("Connected to db");
-    getVotes(client);
+  if (err) {
+    return console.error("Giving up");
   }
+
+  console.log("Connected to db");
+  dbAvailable = true;
+
+  client.on('error', function(err) {
+      dbAvailable = false;
+    console.error("Database connection error: " + err.message);
+    io.sockets.emit("db-unavailable");
+  });
+
+  getVotes(client);
+}
 );
 
 function getVotes(client) {
   client.query('SELECT vote, COUNT(id) AS count FROM votes GROUP BY vote', [], function(err, result) {
     if (err) {
+      dbAvailable = false;
       console.error("Error performing query: " + err);
-    } else {
-      var votes = collectVotesFromResult(result);
-      io.sockets.emit("scores", JSON.stringify(votes));
+      io.sockets.emit("db-unavailable");
+      return;
     }
 
-    setTimeout(function() {getVotes(client) }, 1000);
+    var votes = collectVotesFromResult(result);
+    io.sockets.emit("scores", JSON.stringify(votes));
+
+    setTimeout(function() { getVotes(client); }, 1000);
   });
 }
 

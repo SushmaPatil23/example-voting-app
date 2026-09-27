@@ -10,7 +10,7 @@
     <link rel='stylesheet' href='/stylesheets/style.css' />
   </head>
   <body ng-controller="statsCtrl" >
-     <div id="background-stats">
+     <div id="background-stats"><div id="choice"></div>
        <div id="background-stats-1">
        </div><!--
       --><div id="background-stats-2">
@@ -18,7 +18,7 @@
     </div>
     <div id="content-container">
       <div id="content-container-center">
-        <div id="choice">
+        <div id="choice" ng-if="!dbUnavailable">
           <div class="choice cats">
             <div class="label">Cats</div>
             <div class="stat">{{aPercent | number:1}}%</div>
@@ -32,10 +32,11 @@
       </div>
     </div>
     <div id="result">
-      <span ng-if="total == 0">No votes yet</span>
-      <span ng-if="total == 1">{{total}} vote</span>
-      <span ng-if="total >= 2">{{total}} votes</span>
-    </div>
+  <span ng-if="dbUnavailable">Results currently unavailable</span>
+  <span ng-if="!dbUnavailable && total == 0">No votes yet</span>
+  <span ng-if="!dbUnavailable && total == 1">{{total}} vote</span>
+  <span ng-if="!dbUnavailable && total >= 2">{{total}} votes</span>
+  </div>
     <script src="socket.io.js"></script>
     <script src="angular.min.js"></script>
     <script src="app.js"></script>

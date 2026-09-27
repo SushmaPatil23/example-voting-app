@@ -7,9 +7,11 @@ var bg2 = document.getElementById('background-stats-2');
 app.controller('statsCtrl', function($scope){
   $scope.aPercent = 50;
   $scope.bPercent = 50;
+  $scope.dbUnavailable = false;
 
   var updateScores = function(){
     socket.on('scores', function (json) {
+      $scope.dbUnavailable = false;
        data = JSON.parse(json);
        var a = parseInt(data.a || 0);
        var b = parseInt(data.b || 0);
@@ -27,13 +29,19 @@ app.controller('statsCtrl', function($scope){
     });
   };
 
+  socket.on('db-unavailable', function () {
+    $scope.$apply(function () {
+      $scope.dbUnavailable = true;
+  });
+});
+
   var init = function(){
     document.body.style.opacity=1;
     updateScores();
   };
-  socket.on('message',function(data){
+  
     init();
-  });
+  
 });
 
 function getPercentages(a, b) {
