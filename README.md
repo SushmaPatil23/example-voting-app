@@ -1,80 +1,112 @@
-# Example Voting App
+# PostgreSQL Failure Handling – Result Service
 
-A simple distributed application running across multiple Docker containers.
+## Reproduction
 
-## Getting started
+The application was started using Docker Compose:
 
-Download [Docker Desktop](https://www.docker.com/products/docker-desktop) for Mac or Windows. [Docker Compose](https://docs.docker.com/compose) will be automatically installed. On Linux, make sure you have the latest version of [Compose](https://docs.docker.com/compose/install/).
-
-This solution uses Python, Node.js, .NET, with Redis for messaging and Postgres for storage.
-
-Run in this directory to build and run the app:
-
-```shell
-docker compose up
+```bash
+docker compose up -d --build db redis worker vote result
 ```
 
-The `vote` app will be running at [http://localhost:8080](http://localhost:8080), and the `results` will be at [http://localhost:8081](http://localhost:8081).
+A vote was submitted at `http://localhost:8080`, and non-zero results were confirmed at `http://localhost:8081`.
 
-Alternately, if you want to run it on a [Docker Swarm](https://docs.docker.com/engine/swarm/), first make sure you have a swarm. If you don't, run:
+PostgreSQL was then stopped without stopping the Result service:
 
-```shell
-docker swarm init
+```bash
+docker compose stop db
 ```
 
-Once you have your swarm, in this directory run:
+Before the change, the Result service crashed because the PostgreSQL client's connection error was not handled. The browser returned `ERR_EMPTY_RESPONSE`, and the logs showed an `Unhandled 'error' event`.
+![Result service error - ERR_EMPTY_RESPONSE](TestScreenshots/Error.png)
 
-```shell
-docker stack deploy --compose-file docker-stack.yml vote
+## Finding
+
+The root cause was an unhandled PostgreSQL client connection error in the Result service.
+
+When the established database connection was terminated, the `pg` client emitted an error that caused the Node.js process to terminate.
+
+The application also had no clear user-facing state to indicate that results were unavailable.
+
+## Change Implemented
+
+The Result service was changed to handle PostgreSQL connection and query failures explicitly.
+
+The implementation:
+
+- Tracks database availability.
+- Handles PostgreSQL client connection errors.
+- Logs database failures for operators.
+- Notifies connected clients when the database becomes unavailable.
+- Stops the polling loop when the database connection is no longer usable.
+
+The frontend was changed to display:
+
+```text
+Results currently unavailable
+```
+![Results unavailable](TestScreenshots/ResultsUnavailable.png)
+
+and hide previously received vote scores while the database is unavailable.
+
+## Verification
+
+The healthy state was verified with PostgreSQL running. The Result service logged:
+
+```text
+App running on port 80
+Connected to db
 ```
 
-## Run the app in Kubernetes
+The database failure was then reproduced using:
 
-The folder k8s-specifications contains the YAML specifications of the Voting App's services.
-
-Run the following command to create the deployments and services. Note it will create these resources in your current namespace (`default` if you haven't changed it.)
-
-```shell
-kubectl create -f k8s-specifications/
+```bash
+docker compose stop db
 ```
 
-The `vote` web app is then available on port 31000 on each host of the cluster, the `result` web app is available on port 31001.
+The observed detection time was approximately **2 seconds**.
 
-To remove them, run:
+After the change:
 
-```shell
-kubectl delete -f k8s-specifications/
+- The Result container remained running.
+- The Node.js process did not crash.
+- The browser displayed `Results currently unavailable`.
+- Database connection/query errors were recorded in the Result service logs.
+- No `Unhandled 'error' event` was observed.
+- Previously received scores were not displayed as current results.
+
+Example failure logs:
+
+```text
+Database connection error: terminating connection due to administrator command
+Database connection error: Connection terminated unexpectedly
+Error performing query: Error: Client has encountered a connection error and is not queryable
 ```
 
-## Architecture
+## Regression Verification
 
-![Architecture diagram](architecture.excalidraw.png)
+The repository does not contain a JavaScript unit-test framework for the Result service. The existing `result/tests/tests.sh` test covers successful vote processing and does not cover PostgreSQL connection loss.
 
-* A front-end web app in [Python](/vote) which lets you vote between two options
-* A [Redis](https://hub.docker.com/_/redis/) which collects new votes
-* A [.NET](/worker/) worker which consumes votes and stores them in…
-* A [Postgres](https://hub.docker.com/_/postgres/) database backed by a Docker volume
-* A [Node.js](/result) web app which shows the results of the voting in real time
+Therefore, the database failure behavior was verified using the repeatable manual procedure below:
 
-## Notes
+1. Start the application.
+2. Confirm PostgreSQL is healthy and the Result service connects.
+3. Confirm normal vote results are displayed.
+4. Stop only PostgreSQL.
+5. Confirm the Result service remains running.
+6. Confirm `Results currently unavailable` is displayed.
+7. Confirm the database failure is present in the service logs.
 
-The voting application only accepts one vote per client browser. It does not register additional votes if a vote has already been submitted from a client.
+## Expected Behavior
 
-This isn't an example of a properly architected perfectly designed distributed app... it's just a simple
-example of the various types of pieces and languages you might see (queues, persistent data, etc), and how to
-deal with them in Docker at a basic level.
+When PostgreSQL is available, the Result service displays the current vote results normally.
 
-# Database Failure Handling – Example Voting App
+When PostgreSQL becomes unavailable, the Result service remains running, reports the database failure in its logs, and shows:
 
-## Overview
+```text
+Results currently unavailable
+```
+![Results unavailable](ResultsUnavailable.png)
 
-This submission addresses a database failure scenario in the Result service of
-the Docker Example Voting App.
+The application must not present previously received results as current while the database is unavailable.
 
-The Result service is a Node.js application backed by PostgreSQL. It connects
-to PostgreSQL and periodically queries the database to retrieve the current
-vote counts.
-
-The change focuses on the behavior when PostgreSQL becomes unavailable after
-the Result service has already established a connection.
-
+Automatic database reconnection was not implemented because it is outside the scope of this focused change.
