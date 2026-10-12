@@ -1,0 +1,19 @@
+{
+  "name": "voting-app-regression-tests",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "test": "jest --runInBand"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "testMatch": [
+      "<rootDir>/tests/**/*.test.js"
+    ]
+  },
+  "devDependencies": {
+    "async": "3.2.6",
+    "jest": "30.2.0",
+    "jsdom": "26.1.0"
+  }
+}
