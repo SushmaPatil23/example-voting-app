@@ -194,9 +194,15 @@ function getVotes(client) {
       var queryDurationMs = Number((performance.now() - queryStartedAt).toFixed(2));
 
       if (shuttingDown) {
-        finishShutdownIfReady();
-        return;
-      }
+  log(err ? 'error' : 'info', 'database_query_finished_during_shutdown', {
+    operation: 'fetch_vote_totals',
+    outcome: err ? 'failed' : 'succeeded',
+    duration_ms: queryDurationMs
+  });
+
+  finishShutdownIfReady();
+  return;
+}
 
       if (!dbAvailable) {
         return;
@@ -272,7 +278,8 @@ function finishShutdownIfReady() {
     .then(function() {
       shutdownFinished = true;
       clearTimeout(shutdownTimer);
-      log('info', 'application_shutdown_completed', {});
+      log('info', 'database_pool_closed', {});
+log('info', 'application_shutdown_completed', {});
     })
     .catch(function(err) {
       shutdownFinished = true;
@@ -290,7 +297,11 @@ function shutdown(signal) {
   shuttingDown = true;
   dbAvailable = false;
 
-  log('info', 'application_shutdown_started', { signal: signal });
+ log('info', 'application_shutdown_started', {
+  signal: signal,
+  query_in_flight: queryInFlight,
+  grace_period_ms: 5000
+});
 
   if (pollTimer !== null) {
     clearTimeout(pollTimer);
