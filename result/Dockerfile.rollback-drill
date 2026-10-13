@@ -1,0 +1,7 @@
+FROM localhost:5000/vote-result@sha256:beff496c00eba1e32854acf41087793da0e26fe3571aeb1a3abf66240cf44f05
+
+# Intentionally break the readiness query for this drill.
+RUN node -e "const fs = require('node:fs'); const file = 'health-probes.js'; const source = fs.readFileSync(file, 'utf8'); if (!source.includes('SELECT 1')) throw new Error('Expected readiness query missing'); fs.writeFileSync(file, source.replace('SELECT 1', 'SELECT intentional_rollback_failure()'));"
+
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
