@@ -37,11 +37,12 @@ function log(level, event, fields) {
 
 function safeDatabaseError(err) {
   return {
-    error_name: err && typeof err.name === 'string' && /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(err.name)
+    error_name: err && typeof err.name === 'string' &&
+      /^[A-Za-z][A-Za-z0-9]{0,39}$/.test(err.name)
       ? err.name
       : 'DatabaseError',
-    // Keep only short, stable error codes. Do not log raw messages or SQL.
-    error_code: err && typeof err.code === 'string' && /^[A-Z0-9]{2,10}$/.test(err.code)
+    error_code: err && typeof err.code === 'string' &&
+      /^[A-Z0-9]{2,10}$/.test(err.code)
       ? err.code
       : 'UNKNOWN'
   };
@@ -51,12 +52,22 @@ var dbAvailable = false;
 var pollTimer = null;
 var connectionAttempts = 0;
 
+var shuttingDown = false;
+var queryInFlight = false;
+var httpClosed = false;
+var shutdownFinalizing = false;
+var shutdownFinished = false;
+var shutdownTimer = null;
+var releaseDatabaseClient = null;
+
 var pool = new Pool({
   connectionString: 'postgres://postgres:postgres@db/postgres'
 });
 
+// Create probe handlers only after the pool has been initialized.
+var healthProbes = require('./health-probes')(pool);
+
 // Generate an ID at the service boundary; do not trust a caller-supplied ID.
-// The response header lets an operator correlate a browser request with its log.
 app.use(function(req, res, next) {
   req.requestId = crypto.randomUUID();
   req.requestStartedAt = performance.now();
@@ -113,14 +124,21 @@ function markDatabaseUnavailable() {
     pollTimer = null;
   }
 
-  io.sockets.emit('db-unavailable');
+  if (!shuttingDown) {
+    io.sockets.emit('db-unavailable');
+  }
 }
 
 async.retry(
   { times: 1000, interval: 1000 },
   function(callback) {
     connectionAttempts += 1;
+
     pool.connect(function(err, client, done) {
+      if (!err) {
+        releaseDatabaseClient = done;
+      }
+
       if (err && (connectionAttempts === 1 || connectionAttempts % 10 === 0)) {
         log('warn', 'database_connection_attempt_failed', Object.assign({
           attempt: connectionAttempts
@@ -139,6 +157,14 @@ async.retry(
       return;
     }
 
+    if (shuttingDown) {
+      if (releaseDatabaseClient) {
+        releaseDatabaseClient();
+        releaseDatabaseClient = null;
+      }
+      return;
+    }
+
     log('info', 'database_connected', { attempts: connectionAttempts });
     dbAvailable = true;
 
@@ -152,20 +178,26 @@ async.retry(
 );
 
 function getVotes(client) {
-  // Do not start a query after the database becomes unavailable.
-  if (!dbAvailable) {
+  if (!dbAvailable || shuttingDown) {
     return;
   }
 
   var queryStartedAt = performance.now();
+  queryInFlight = true;
 
   client.query(
     'SELECT vote, COUNT(id) AS count FROM votes GROUP BY vote',
     [],
     function(err, result) {
+      queryInFlight = false;
+
       var queryDurationMs = Number((performance.now() - queryStartedAt).toFixed(2));
 
-      // Ignore a query callback arriving after connection loss.
+      if (shuttingDown) {
+        finishShutdownIfReady();
+        return;
+      }
+
       if (!dbAvailable) {
         return;
       }
@@ -207,6 +239,98 @@ app.use(express.static(__dirname + '/views'));
 
 app.get('/', function(req, res) {
   res.sendFile(path.resolve(__dirname, 'views/index.html'));
+});
+
+app.get('/healthz', healthProbes.healthz);
+app.get('/readyz', healthProbes.readyz);
+
+app.get('/version', function(req, res) {
+  res.status(200).json({
+    service: 'vote-result',
+    version: require('./package.json').version,
+    commit: process.env.GIT_SHA || 'unknown'
+  });
+});
+
+function finishShutdownIfReady() {
+  if (!shuttingDown ||
+      !httpClosed ||
+      queryInFlight ||
+      shutdownFinalizing ||
+      shutdownFinished) {
+    return;
+  }
+
+  shutdownFinalizing = true;
+
+  if (releaseDatabaseClient) {
+    releaseDatabaseClient();
+    releaseDatabaseClient = null;
+  }
+
+  pool.end()
+    .then(function() {
+      shutdownFinished = true;
+      clearTimeout(shutdownTimer);
+      log('info', 'application_shutdown_completed', {});
+    })
+    .catch(function(err) {
+      shutdownFinished = true;
+      clearTimeout(shutdownTimer);
+      log('error', 'application_shutdown_failed', safeDatabaseError(err));
+      process.exitCode = 1;
+    });
+}
+
+function shutdown(signal) {
+  if (shuttingDown) {
+    return;
+  }
+
+  shuttingDown = true;
+  dbAvailable = false;
+
+  log('info', 'application_shutdown_started', { signal: signal });
+
+  if (pollTimer !== null) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+
+  shutdownTimer = setTimeout(function() {
+    if (shutdownFinished) {
+      return;
+    }
+
+    log('error', 'application_shutdown_timeout', {
+      signal: signal,
+      timeout_ms: 5000
+    });
+
+    if (releaseDatabaseClient) {
+      releaseDatabaseClient(new Error('Shutdown deadline exceeded'));
+      releaseDatabaseClient = null;
+    }
+
+    process.exit(1);
+  }, 5000);
+
+  shutdownTimer.unref();
+
+  io.close(function() {
+    httpClosed = true;
+    finishShutdownIfReady();
+  });
+
+  finishShutdownIfReady();
+}
+
+process.on('SIGTERM', function() {
+  shutdown('SIGTERM');
+});
+
+process.on('SIGINT', function() {
+  shutdown('SIGINT');
 });
 
 server.listen(port, function() {

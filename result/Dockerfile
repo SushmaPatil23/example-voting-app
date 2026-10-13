@@ -17,7 +17,8 @@ RUN npm ci && \
  mv /usr/local/app/node_modules /node_modules
 
 COPY . .
-
+ARG GIT_SHA=unknown
+ENV GIT_SHA=$GIT_SHA
 ENV PORT=80
 EXPOSE 80
 
