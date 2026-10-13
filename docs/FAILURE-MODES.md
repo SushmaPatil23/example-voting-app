@@ -19,6 +19,186 @@ Vote accepts a submission and adds it to Redis. Worker reads the queued vote and
 | Redis unavailable | Vote cannot complete its Redis write. Worker stays running and retries Redis connections. | Submission loads for a long time, then shows a Flask technical error page. | `POST /` returns HTTP 500; Redis `ConnectionError`; Worker logs `Waiting for redis`. | After Redis returned, reopening/refreshing the voting page and submitting again updated results. No Vote or Worker restart was reported. |
 | PostgreSQL returns a query error | DB stays running, but renaming `votes` makes Result's SELECT fail. Polling stops. | “Results currently unavailable,” including after the table name is restored. | `Error performing query: error: relation "votes" does not exist`. | After restoring the table, restarting Result and starting Worker restored the results page. |
 
+
+## Fail-fast vs fail-safe
+
+Fail-fast means stopping an operation promptly when it cannot succeed,
+instead of continuing to wait or consuming more resources.
+
+Fail-safe means handling failure in a way that protects correctness
+and leaves the application in a safe state.
+
+These approaches can work together: an operation can fail quickly
+and still provide a safe response.
+
+| Aspect | Fail-fast | Fail-safe |
+|---|---|---|
+| Main goal | Avoid unnecessary waiting and work. | Protect correctness when something fails. |
+| Voting-app example | End a database query after a defined timeout. | Hide unverified results and show “Results currently unavailable.” |
+| Redis example | End a failed submission within a bounded deadline. | Do not tell the user their vote was accepted unless queue acceptance is confirmed. |
+| Main trade-off | A brief dependency problem may cause an operation to fail. | Some features become unavailable to avoid misleading behaviour. |
+
+### What our tests showed
+
+- During the slow-DB test, Result waited and continued showing previous
+  totals. It did not fail fast or indicate that results were stale.
+- After a DB connection or query error, Result hid numeric results and
+  displayed an unavailable message. This protected users from treating
+  those totals as current.
+- During the Redis outage, submission waited and eventually returned
+  HTTP 500 with a technical error page. This needs a clearer user-facing
+  failure response.
+
+### Expected approach
+
+Use bounded waiting for dependency operations, then provide a clear
+failure state. Never convert a database error into “zero votes,” and
+never report successful vote acceptance when acceptance is uncertain.
+
+A timeout should be selected from measured normal response times and
+the application's requirements. No new timeout is implemented by
+these notes.
+## Graceful degradation
+
+Graceful degradation means keeping useful parts of the application
+available when a dependency fails.
+
+Our Result service remains running after a detected database error
+and displays “Results currently unavailable.” This prevents users
+from treating previously received totals as current results.
+
+The protection is incomplete: slow queries leave old totals visible
+without a warning, and Redis failures expose a technical error page.
+
+Vote and Redis can remain available during a PostgreSQL outage,
+but queue acceptance does not prove that a vote reached the database.
+
+## Retry design
+
+Retries should be used for temporary failures and bounded by an
+attempt limit and an overall time budget.
+
+| Failure | Retry decision |
+|---|---|
+| Temporary connection failure | Retry with a timeout and backoff. |
+| Database overload or timeout | Retry cautiously to avoid increasing the load. |
+| Missing table, invalid SQL or invalid credentials | Stop unchanged retries and correct the cause. |
+| Write with an uncertain outcome | Avoid blind retries because the first write may have succeeded. |
+
+Result currently retries its initial connection up to 1,000 times,
+with a one-second delay after each failed attempt. It does not
+automatically reconnect after an established connection fails.
+
+A retry policy should:
+- Classify temporary and permanent errors.
+- Bound individual operations and total retry duration.
+- Increase delays between repeated failures.
+- Stop on success, permanent failure, exhausted budget or shutdown.
+- Avoid retries at multiple layers multiplying the work.
+- Log exhaustion without exposing credentials.
+
+Read-only vote queries can be repeated without duplicating votes.
+Writes require an idempotency or deduplication strategy. A unique
+voter ID alone does not prevent an old retried vote from overwriting
+a newer choice.
+
+## Exponential backoff
+
+Exponential backoff increases the delay between retries, for example
+500 ms, 1 second, 2 seconds and 4 seconds.
+
+A maximum delay prevents unlimited growth. Jitter randomises the
+delay so multiple clients do not retry simultaneously and overload
+the recovering dependency.
+
+The current Result service uses fixed-delay startup retries.
+
+### Example implementation
+
+The standalone example is in [backoff-example.js](backoff-example.js).
+It simulates temporary database connection failures and demonstrates
+increasing retry delays with a maximum attempt limit.
+
+![Backoff example output](../TestScreenshots/backoff-example.png)
+
+## Circuit breakers
+
+A circuit breaker temporarily blocks calls to a repeatedly failing
+dependency.
+
+| State | Behaviour |
+|---|---|
+| Closed | Allow calls and monitor failures. |
+| Open | Reject calls quickly during a cooldown period. |
+| Half-open | Allow a limited trial operation to check recovery. |
+
+A successful trial allows normal calls to resume. A failed trial
+opens the circuit again.
+
+For Result, this could mean pausing normal polling after repeated
+database failures, showing unavailable results and allowing a
+controlled recovery query later.
+
+The benefit is reduced pressure on a failing dependency. The
+trade-off is extra state and potentially delayed recovery.
+
+The current application has no circuit breaker. Stopping polling
+without a recovery path is not a complete circuit breaker.
+
+## Bulkheads
+
+Bulkheads isolate resources so one failing component cannot exhaust
+resources needed by the rest of the application.
+
+Separate Vote, Result and Worker containers provide some process
+isolation. Worker exited during our DB connection-loss test while
+Result remained running.
+
+However, containers still share host resources and dependencies.
+Stronger isolation could include:
+- Bounded database connection pools and waiting requests.
+- Limits on concurrent dependency operations.
+- Container CPU and memory limits.
+- Queue capacity limits and controlled rejection of excess work.
+
+These protections limit the impact of failures but require capacity
+planning. Separate containers alone do not guarantee isolation.
+
+## Expected behaviour during database failure
+
+This is the proposed behaviour, not a claim that every requirement
+is already implemented.
+
+| Situation | Expected behaviour | Verification |
+|---|---|---|
+| Healthy database | Display totals from successful queries. | Change a vote and confirm updated results. |
+| DB unavailable at startup | Keep Result running, show unavailable and retry within a defined budget. | Start Result while DB is stopped. |
+| Slow query | Enforce a query deadline and stop presenting outdated totals as current. | Hold a table lock beyond the configured deadline. |
+| Connection lost | Mark results unavailable, stop normal polling and discard the unusable connection. | Stop DB after Result connects. |
+| Permanent query error | Log the error and stop unchanged retries until the cause is corrected. | Temporarily rename the required table. |
+| New browser during failure | Immediately communicate the unavailable state. | Open a fresh browser tab during the outage. |
+| Dependency restored | Mark results available only after a successful vote-count query. | Restore the dependency and check current totals. |
+| Retry budget exhausted | Remain unavailable and provide an operator-visible failure signal. | Keep DB unavailable until retries are exhausted. |
+
+Never use zero votes as a fallback for a failed query.
+
+Normal polling must stop on failure. Any future automatic recovery
+should use a separate, controlled mechanism and resume polling only
+after a successful query.
+
+Connection deadlines, query deadlines, retry limits and recovery
+targets need to be selected using measured normal response times.
+The total retry budget must include operation time and retry delays.
+
+For the current implementation, runtime connection loss and query
+errors require manual Result recovery after the cause is corrected.
+
+Operator logs should include timestamps, the affected service,
+the failed operation and safe error details. They must not expose
+credentials or sensitive data.
+
+
+
 ## 1. PostgreSQL unavailable at startup
 
 **Simulation:** Stopped Result, Worker and DB, then started only Result with `--no-deps`. This bypassed Compose's DB health dependency so Result's own startup handling could be tested.
@@ -129,6 +309,10 @@ Existing rows were preserved by renaming the table back. The user confirmed resu
 - A healthy container or successful GET check did not prove that vote submission and processing worked.
 - No exact failure-detection/recovery targets, retry-exhaustion behaviour or vote-loss guarantees were validated.
 
-This exercise remains documentation-only: it demonstrates and records existing behaviour. No reliability fixes or automated regression tests are claimed. The broader ticket contains separate implementation/testing tasks; these notes do not mark those tasks complete.
+## References
 
-**Deliverable naming:** These notes include the requested failure matrix. If the company requires the exact filename `FAILURE-MODES.md`, save this document under that name in the repository.
+- https://aws.amazon.com/builders-library/timeouts-retries-and-backoff-with-jitter/
+- https://learn.microsoft.com/en-us/azure/architecture/patterns/circuit-breaker
+- https://learn.microsoft.com/en-us/azure/architecture/patterns/bulkhead
+
+

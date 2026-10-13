@@ -36,7 +36,8 @@ function createBackend({ query }) {
   };
 
   const dependencies = {
-    express,
+  'node:path': path,
+  express,
     async: require('async'),
     pg: {
       Pool: function () {
