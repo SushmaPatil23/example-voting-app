@@ -1,0 +1,18 @@
+;
+; Archive created at 2026-10-13 15:52:47 UTC
+;     dbname: postgres
+;     TOC Entries: 8
+;     Compression: -1
+;     Dump Version: 1.14-0
+;     Format: CUSTOM
+;     Integer: 4 bytes
+;     Offset: 8 bytes
+;     Dumped from database version: 15.19
+;     Dumped by pg_dump version: 15.19
+;
+;
+; Selected TOC Entries:
+;
+214; 1259 16384 TABLE public votes postgres
+3440; 0 16384 TABLE DATA public votes postgres
+3297; 2606 16390 CONSTRAINT public votes votes_id_key postgres

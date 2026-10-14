@@ -1,0 +1,8 @@
+services:
+  result:
+    image: ${RESULT_IMAGE:?Set RESULT_IMAGE using a rollback env file}
+    build: !reset null
+    entrypoint: ["/usr/bin/tini", "--"]
+    command: ["node", "server.js"]
+    volumes: !reset []
+    stop_grace_period: 6s
